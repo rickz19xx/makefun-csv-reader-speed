@@ -8,9 +8,20 @@ export function answer(input) {
   const header = input.header === true;
   const rowsOut = [];
   const errOut = [];
+  const batch = [];
+  const colParts = [];
+  let inBatch = 0;
+  let rowIndex = 0;
   let columnsText = null;
   let width = -1;
-  let pos = len > 0 && text.charCodeAt(0) === 0xfeff ? 1 : 0;
+  // a U+FEFF at its very start is dropped: one char when the text is UTF-16, three bytes
+  // (EF BB BF) when the bytes are read as one-byte chars
+  let pos = 0;
+  if (len > 0) {
+    const c0 = text.charCodeAt(0);
+    if (c0 === 0xfeff) pos = 1;
+    else if (c0 === 0xef && text.charCodeAt(1) === 0xbb && text.charCodeAt(2) === 0xbf) pos = 3;
+  }
   let line = 1;
 
   for (;;) {
@@ -24,9 +35,13 @@ export function answer(input) {
     if (pos >= len) break;
 
     const recordLine = line;
-    const recordRow = header && columnsText === null ? null : rowsOut.length;
+    const recordRow = header && columnsText === null ? null : rowIndex;
     const rowStr = recordRow === null ? 'null' : String(recordRow);
-    const parts = [];
+    const mark = batch.length;
+    const isHeader = header && columnsText === null;
+    const arr = isHeader ? colParts : batch;
+    if (!isHeader) batch.push(batch.length === 0 ? '["' : '"],["');
+    let n = 0;
     let lastQuoted = false;
     let onlyEmpty = false;
 
@@ -143,28 +158,49 @@ export function answer(input) {
       if (quoted && closed >= 0 && added > 0) {
         errOut.push('{"code":"quote_junk","line":' + recordLine + ',"row":' + rowStr + '}');
       }
-      parts.push(value === null ? '' : value);
-      if (parts.length === 1) onlyEmpty = empty;
+      if (n > 0) arr.push('","');
+      arr.push(value === null ? '' : value);
+      if (n === 0) onlyEmpty = empty;
+      n += 1;
       if (!comma) break;
     }
 
-    const n = parts.length;
-    if (n === 1 && onlyEmpty && !lastQuoted) continue;
+    if (n === 1 && onlyEmpty && !lastQuoted) {
+      if (isHeader) colParts.length = 0;
+      else batch.length = mark;
+      continue;
+    }
     if (width < 0) width = n;
-    if (header && columnsText === null) {
-      columnsText = '["' + parts.join('","') + '"]';
+    if (isHeader) {
+      columnsText = '["' + colParts.join('') + '"]';
+      colParts.length = 0;
       continue;
     }
     if (n < width) {
       errOut.push('{"code":"short_row","line":' + recordLine + ',"row":' + rowStr + ',"fields":' + n + '}');
-      for (let k = n; k < width; k++) parts.push('');
+      batch.push('","'.repeat(width - n));
     } else if (n > width) {
-      errOut.push('{"code":"long_row","line":' + recordLine + ',"row":' + rowStr + ',"extra":["' + parts.slice(width).join('","') + '"]}');
-      parts.length = width;
+      const cutAt = batch.length - 2 * (n - width);
+      const tail = batch.slice(cutAt);
+      const extra = [];
+      for (let k = 1; k < tail.length; k += 2) extra.push(tail[k]);
+      errOut.push('{"code":"long_row","line":' + recordLine + ',"row":' + rowStr + ',"extra":["' + extra.join('","') + '"]}');
+      batch.length = cutAt;
     }
-    rowsOut.push('["' + parts.join('","') + '"]');
+    rowIndex += 1;
+    inBatch += 1;
+    if (inBatch === 8) {
+      batch.push('"]');
+      rowsOut.push(batch.join(''));
+      batch.length = 0;
+      inBatch = 0;
+    }
   }
 
+  if (batch.length > 0) {
+    batch.push('"]');
+    rowsOut.push(batch.join(''));
+  }
   return '{"columns":' + (header ? (columnsText === null ? '[]' : columnsText) : 'null') +
     ',"rows":[' + rowsOut.join(',') + '],"errors":[' + errOut.join(',') + ']}';
 }
